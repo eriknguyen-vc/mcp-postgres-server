@@ -209,11 +209,25 @@ class PostgresServer {
           },
         },
         {
-          name: 'list_tables',
-          description: 'List all tables in the database',
+          name: 'list_schemas',
+          description: 'List all schemas in the database',
           inputSchema: {
             type: 'object',
             properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'list_tables',
+          description: 'List tables in the database',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              schema: {
+                type: 'string',
+                description: 'Schema name (default: public)',
+              },
+            },
             required: [],
           },
         },
@@ -227,13 +241,17 @@ class PostgresServer {
                 type: 'string',
                 description: 'Table name',
               },
+              schema: {
+                type: 'string',
+                description: 'Schema name (default: public)',
+              },
             },
             required: ['table'],
           },
         },
       ],
     }));
-
+  
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       switch (request.params.name) {
         case 'connect_db':
@@ -242,8 +260,10 @@ class PostgresServer {
           return await this.handleQuery(request.params.arguments);
         case 'execute':
           return await this.handleExecute(request.params.arguments);
+        case 'list_schemas':
+          return await this.handleListSchemas();
         case 'list_tables':
-          return await this.handleListTables();
+          return await this.handleListTables(request.params.arguments);
         case 'describe_table':
           return await this.handleDescribeTable(request.params.arguments);
         default:
@@ -369,16 +389,44 @@ class PostgresServer {
     }
   }
 
-  private async handleListTables() {
+  private async handleListSchemas() {
     await this.ensureConnection();
+  
+    try {
+      const result = await this.client!.query(`
+        SELECT schema_name
+        FROM information_schema.schemata
+        ORDER BY schema_name
+      `);
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result.rows, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to list schemas: ${getErrorMessage(error)}`
+      );
+    }
+  }
 
+  private async handleListTables(args: any = {}) {
+    await this.ensureConnection();
+  
+    const schema = args.schema || 'public';
+  
     try {
       const result = await this.client!.query(`
         SELECT table_name
         FROM information_schema.tables
-        WHERE table_schema = 'public'
+        WHERE table_schema = $1
         ORDER BY table_name
-      `);
+      `, [schema]);
       
       return {
         content: [
@@ -398,11 +446,13 @@ class PostgresServer {
 
   private async handleDescribeTable(args: any) {
     await this.ensureConnection();
-
+  
     if (!args.table) {
       throw new McpError(ErrorCode.InvalidParams, 'Table name is required');
     }
-
+  
+    const schema = args.schema || 'public';
+  
     try {
       const result = await this.client!.query(`
         SELECT 
@@ -421,7 +471,8 @@ class PostgresServer {
           SELECT 
             tc.constraint_type, 
             kcu.column_name, 
-            kcu.table_name
+            kcu.table_name,
+            kcu.table_schema
           FROM 
             information_schema.table_constraints tc
           JOIN 
@@ -434,12 +485,13 @@ class PostgresServer {
         ON 
           c.column_name = pk.column_name
           AND c.table_name = pk.table_name
+          AND c.table_schema = pk.table_schema
         WHERE 
-          c.table_schema = 'public' 
-          AND c.table_name = $1
+          c.table_schema = $1 
+          AND c.table_name = $2
         ORDER BY 
           c.ordinal_position
-      `, [args.table]);
+      `, [schema, args.table]);
       
       return {
         content: [

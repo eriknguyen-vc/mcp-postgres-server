@@ -89,28 +89,61 @@ use_mcp_tool({
 });
 ```
 
-### 4. list_tables
+### 4. list_schemas
 
-List all tables in the connected database.
+List all schemas in the connected database.
 
 ```javascript
+use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "list_schemas",
+  arguments: {}
+});
+```
+
+### 5. list_tables
+
+List tables in the connected database. Accepts an optional schema parameter (defaults to 'public').
+
+```javascript
+// List tables in the 'public' schema (default)
 use_mcp_tool({
   server_name: "postgres",
   tool_name: "list_tables",
   arguments: {}
 });
+
+// List tables in a specific schema
+use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "list_tables",
+  arguments: {
+    schema: "my_schema"
+  }
+});
 ```
 
-### 5. describe_table
+### 6. describe_table
 
-Get the structure of a specific table.
+Get the structure of a specific table. Accepts an optional schema parameter (defaults to 'public').
 
 ```javascript
+// Describe a table in the 'public' schema (default)
 use_mcp_tool({
   server_name: "postgres",
   tool_name: "describe_table",
   arguments: {
     table: "users"
+  }
+});
+
+// Describe a table in a specific schema
+use_mcp_tool({
+  server_name: "postgres",
+  tool_name: "describe_table",
+  arguments: {
+    table: "users",
+    schema: "my_schema"
   }
 });
 ```
@@ -124,6 +157,7 @@ use_mcp_tool({
 * TypeScript support
 * Automatic connection management
 * Supports PostgreSQL-specific syntax and features
+* Multi-schema support for database operations
 
 ## Security
 
