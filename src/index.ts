@@ -20,6 +20,8 @@ interface DatabaseConfig {
   user: string;
   password: string;
   database: string;
+  ssl?: boolean | { rejectUnauthorized?: boolean };
+  channel_binding?: 'disable' | 'prefer' | 'require';
 }
 
 // Type guard for error objects
@@ -90,7 +92,6 @@ class PostgresServer {
 
   private async ensureConnection() {
     if (!this.config) {
-      // Try to use environment variables if no explicit config was provided
       const envConfig = this.getEnvConfig();
       
       if (envConfig) {
@@ -118,16 +119,36 @@ class PostgresServer {
   }
   
   private getEnvConfig(): DatabaseConfig | null {
-    const { PG_HOST, PG_USER, PG_PASSWORD, PG_DATABASE, PG_PORT } = process.env;
+    const {
+      PG_HOST, PG_USER, PG_PASSWORD, PG_DATABASE, PG_PORT,
+      PG_SSL, PG_CHANNEL_BINDING
+    } = process.env;
     
     if (PG_HOST && PG_USER && PG_PASSWORD && PG_DATABASE) {
-      return {
+      const cfg: DatabaseConfig = {
         host: PG_HOST,
         port: PG_PORT ? parseInt(PG_PORT, 10) : 5432,
         user: PG_USER,
         password: PG_PASSWORD,
-        database: PG_DATABASE
+        database: PG_DATABASE,
       };
+
+      // SSL config
+      if (PG_SSL === 'disable') {
+        cfg.ssl = false;
+      } else if (PG_SSL === 'strict') {
+        cfg.ssl = true;
+      } else {
+        // default: prefer (try SSL, don't reject unauthorized)
+        cfg.ssl = { rejectUnauthorized: false };
+      }
+
+      // channel_binding
+      if (PG_CHANNEL_BINDING) {
+        cfg.channel_binding = PG_CHANNEL_BINDING as 'disable' | 'prefer' | 'require';
+      }
+
+      return cfg;
     }
     
     return null;
@@ -142,26 +163,11 @@ class PostgresServer {
           inputSchema: {
             type: 'object',
             properties: {
-              host: {
-                type: 'string',
-                description: 'Database host',
-              },
-              port: {
-                type: 'number',
-                description: 'Database port (default: 5432)',
-              },
-              user: {
-                type: 'string',
-                description: 'Database user',
-              },
-              password: {
-                type: 'string',
-                description: 'Database password',
-              },
-              database: {
-                type: 'string',
-                description: 'Database name',
-              },
+              host: { type: 'string', description: 'Database host' },
+              port: { type: 'number', description: 'Database port (default: 5432)' },
+              user: { type: 'string', description: 'Database user' },
+              password: { type: 'string', description: 'Database password' },
+              database: { type: 'string', description: 'Database name' },
             },
             required: ['host', 'user', 'password', 'database'],
           },
@@ -172,15 +178,10 @@ class PostgresServer {
           inputSchema: {
             type: 'object',
             properties: {
-              sql: {
-                type: 'string',
-                description: 'SQL SELECT query (use $1, $2, etc. for parameters)',
-              },
+              sql: { type: 'string', description: 'SQL SELECT query (use $1, $2, etc. for parameters)' },
               params: {
                 type: 'array',
-                items: {
-                  type: ['string', 'number', 'boolean', 'null'],
-                },
+                items: { type: ['string', 'number', 'boolean', 'null'] },
                 description: 'Query parameters (optional)',
               },
             },
@@ -193,15 +194,10 @@ class PostgresServer {
           inputSchema: {
             type: 'object',
             properties: {
-              sql: {
-                type: 'string',
-                description: 'SQL query (INSERT, UPDATE, DELETE) (use $1, $2, etc. for parameters)',
-              },
+              sql: { type: 'string', description: 'SQL query (INSERT, UPDATE, DELETE)' },
               params: {
                 type: 'array',
-                items: {
-                  type: ['string', 'number', 'boolean', 'null'],
-                },
+                items: { type: ['string', 'number', 'boolean', 'null'] },
                 description: 'Query parameters (optional)',
               },
             },
@@ -211,11 +207,7 @@ class PostgresServer {
         {
           name: 'list_schemas',
           description: 'List all schemas in the database',
-          inputSchema: {
-            type: 'object',
-            properties: {},
-            required: [],
-          },
+          inputSchema: { type: 'object', properties: {}, required: [] },
         },
         {
           name: 'list_tables',
@@ -223,10 +215,7 @@ class PostgresServer {
           inputSchema: {
             type: 'object',
             properties: {
-              schema: {
-                type: 'string',
-                description: 'Schema name (default: public)',
-              },
+              schema: { type: 'string', description: 'Schema name (default: public)' },
             },
             required: [],
           },
@@ -237,14 +226,8 @@ class PostgresServer {
           inputSchema: {
             type: 'object',
             properties: {
-              table: {
-                type: 'string',
-                description: 'Table name',
-              },
-              schema: {
-                type: 'string',
-                description: 'Schema name (default: public)',
-              },
+              table: { type: 'string', description: 'Table name' },
+              schema: { type: 'string', description: 'Schema name (default: public)' },
             },
             required: ['table'],
           },
@@ -267,23 +250,16 @@ class PostgresServer {
         case 'describe_table':
           return await this.handleDescribeTable(request.params.arguments);
         default:
-          throw new McpError(
-            ErrorCode.MethodNotFound,
-            `Unknown tool: ${request.params.name}`
-          );
+          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
       }
     });
   }
 
   private async handleConnectDb(args: any) {
     if (!args.host || !args.user || !args.password || !args.database) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        'Missing required database configuration parameters'
-      );
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required database configuration parameters');
     }
 
-    // Close existing connection if any
     if (this.client) {
       await this.client.end();
       this.client = null;
@@ -295,217 +271,98 @@ class PostgresServer {
       user: args.user,
       password: args.password,
       database: args.database,
+      ssl: { rejectUnauthorized: false },
     };
 
     try {
       await this.ensureConnection();
       return {
-        content: [
-          {
-            type: 'text',
-            text: 'Successfully connected to PostgreSQL database',
-          },
-        ],
+        content: [{ type: 'text', text: 'Successfully connected to PostgreSQL database' }],
       };
     } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to connect to database: ${getErrorMessage(error)}`
-      );
+      throw new McpError(ErrorCode.InternalError, `Failed to connect to database: ${getErrorMessage(error)}`);
     }
   }
 
   private async handleQuery(args: any) {
     await this.ensureConnection();
-
-    if (!args.sql) {
-      throw new McpError(ErrorCode.InvalidParams, 'SQL query is required');
-    }
-
+    if (!args.sql) throw new McpError(ErrorCode.InvalidParams, 'SQL query is required');
     if (!args.sql.trim().toUpperCase().startsWith('SELECT')) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        'Only SELECT queries are allowed with query tool'
-      );
+      throw new McpError(ErrorCode.InvalidParams, 'Only SELECT queries are allowed with query tool');
     }
-
     try {
-      // Convert ? parameters to $1, $2, etc. if needed
       const sql = args.sql.includes('?') ? convertToNamedParams(args.sql) : args.sql;
       const result = await this.client!.query(sql, args.params || []);
-      
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(result.rows, null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: 'text', text: JSON.stringify(result.rows, null, 2) }] };
     } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Query execution failed: ${getErrorMessage(error)}`
-      );
+      throw new McpError(ErrorCode.InternalError, `Query execution failed: ${getErrorMessage(error)}`);
     }
   }
 
   private async handleExecute(args: any) {
     await this.ensureConnection();
-
-    if (!args.sql) {
-      throw new McpError(ErrorCode.InvalidParams, 'SQL query is required');
+    if (!args.sql) throw new McpError(ErrorCode.InvalidParams, 'SQL query is required');
+    if (args.sql.trim().toUpperCase().startsWith('SELECT')) {
+      throw new McpError(ErrorCode.InvalidParams, 'Use query tool for SELECT statements');
     }
-
-    const sql = args.sql.trim().toUpperCase();
-    if (sql.startsWith('SELECT')) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        'Use query tool for SELECT statements'
-      );
-    }
-
     try {
-      // Convert ? parameters to $1, $2, etc. if needed
       const preparedSql = args.sql.includes('?') ? convertToNamedParams(args.sql) : args.sql;
       const result = await this.client!.query(preparedSql, args.params || []);
-      
       return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              rowCount: result.rowCount,
-              command: result.command,
-            }, null, 2),
-          },
-        ],
+        content: [{ type: 'text', text: JSON.stringify({ rowCount: result.rowCount, command: result.command }, null, 2) }],
       };
     } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Query execution failed: ${getErrorMessage(error)}`
-      );
+      throw new McpError(ErrorCode.InternalError, `Query execution failed: ${getErrorMessage(error)}`);
     }
   }
 
   private async handleListSchemas() {
     await this.ensureConnection();
-  
     try {
-      const result = await this.client!.query(`
-        SELECT schema_name
-        FROM information_schema.schemata
-        ORDER BY schema_name
-      `);
-      
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(result.rows, null, 2),
-          },
-        ],
-      };
+      const result = await this.client!.query(`SELECT schema_name FROM information_schema.schemata ORDER BY schema_name`);
+      return { content: [{ type: 'text', text: JSON.stringify(result.rows, null, 2) }] };
     } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to list schemas: ${getErrorMessage(error)}`
-      );
+      throw new McpError(ErrorCode.InternalError, `Failed to list schemas: ${getErrorMessage(error)}`);
     }
   }
 
   private async handleListTables(args: any = {}) {
     await this.ensureConnection();
-  
     const schema = args.schema || 'public';
-  
     try {
-      const result = await this.client!.query(`
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = $1
-        ORDER BY table_name
-      `, [schema]);
-      
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(result.rows, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to list tables: ${getErrorMessage(error)}`
+      const result = await this.client!.query(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
+        [schema]
       );
+      return { content: [{ type: 'text', text: JSON.stringify(result.rows, null, 2) }] };
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Failed to list tables: ${getErrorMessage(error)}`);
     }
   }
 
   private async handleDescribeTable(args: any) {
     await this.ensureConnection();
-  
-    if (!args.table) {
-      throw new McpError(ErrorCode.InvalidParams, 'Table name is required');
-    }
-  
+    if (!args.table) throw new McpError(ErrorCode.InvalidParams, 'Table name is required');
     const schema = args.schema || 'public';
-  
     try {
       const result = await this.client!.query(`
         SELECT 
-          c.column_name, 
-          c.data_type, 
-          c.is_nullable, 
-          c.column_default,
-          CASE 
-            WHEN pk.constraint_type = 'PRIMARY KEY' THEN true 
-            ELSE false 
-          END AS is_primary_key,
+          c.column_name, c.data_type, c.is_nullable, c.column_default,
+          CASE WHEN pk.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key,
           c.character_maximum_length
-        FROM 
-          information_schema.columns c
+        FROM information_schema.columns c
         LEFT JOIN (
-          SELECT 
-            tc.constraint_type, 
-            kcu.column_name, 
-            kcu.table_name,
-            kcu.table_schema
-          FROM 
-            information_schema.table_constraints tc
-          JOIN 
-            information_schema.key_column_usage kcu
-          ON 
-            tc.constraint_name = kcu.constraint_name
-          WHERE 
-            tc.constraint_type = 'PRIMARY KEY'
-        ) pk
-        ON 
-          c.column_name = pk.column_name
-          AND c.table_name = pk.table_name
-          AND c.table_schema = pk.table_schema
-        WHERE 
-          c.table_schema = $1 
-          AND c.table_name = $2
-        ORDER BY 
-          c.ordinal_position
+          SELECT tc.constraint_type, kcu.column_name, kcu.table_name, kcu.table_schema
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+          WHERE tc.constraint_type = 'PRIMARY KEY'
+        ) pk ON c.column_name = pk.column_name AND c.table_name = pk.table_name AND c.table_schema = pk.table_schema
+        WHERE c.table_schema = $1 AND c.table_name = $2
+        ORDER BY c.ordinal_position
       `, [schema, args.table]);
-      
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(result.rows, null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: 'text', text: JSON.stringify(result.rows, null, 2) }] };
     } catch (error) {
-      throw new McpError(
-        ErrorCode.InternalError,
-        `Failed to describe table: ${getErrorMessage(error)}`
-      );
+      throw new McpError(ErrorCode.InternalError, `Failed to describe table: ${getErrorMessage(error)}`);
     }
   }
 
